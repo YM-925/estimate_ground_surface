@@ -30,16 +30,10 @@ public:
 private:
     // コールバック関数
     void topic_callback(const sensor_msgs::msg::PointCloud2 &msg);
-    
+
     // RANSACによる平面検出関数
-    void detectPlanes(const pcl::PointCloud<pcl::PointXYZRGB>::Ptr& input_cloud,
-                     pcl::PointCloud<pcl::PointXYZRGB>::Ptr& plane_cloud,
-                     pcl::PointCloud<pcl::PointXYZRGB>::Ptr& obstacle_cloud,
-                     Eigen::Vector4f& plane_coefficients);
-    
-    // 平面の可視化マーカーを作成する関数
-    visualization_msgs::msg::Marker createPlaneMarker(const Eigen::Vector4f& coefficients,
-                                                      const std::string& frame_id);
+    void detectAndColorPlane(const pcl::PointCloud<pcl::PointXYZRGB>::Ptr &input_cloud,
+                             pcl::PointCloud<pcl::PointXYZRGB>::Ptr &colored_cloud);
 
     // TF2関連
     tf2_ros::Buffer tf_buffer_;
@@ -48,22 +42,20 @@ private:
     // サブスクライバーとパブリッシャー
     rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr _lidar_subscription_;
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr point_publisher_;
-    rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr plane_publisher_;        // 平面点群用
-    rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr obstacle_publisher_;    // 障害物点群用
-    rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr marker_publisher_;
+    // rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr marker_publisher_;
 
     // パラメータ変数
     // LiDARとIMUの誤差補正
     double roll_diff;
     double pitch_diff;
-    
+
     // LiDARの高さオフセット
     double height;
-    
+
     // 点群切り取り範囲
     double minX, minY, minZ, minA;
     double maxX, maxY, maxZ, maxA;
-    
+
     // グリッド関連
     double grid_min_x, grid_max_x;
     double grid_min_y, grid_max_y;
@@ -72,12 +64,12 @@ private:
     int grid_cluster_size;
     double z_threshold_low, z_threshold_high;
     double step_ratio_threshold;
-    
+
     // RANSACパラメータ
-    double ransac_distance_threshold;   // 平面からの距離閾値
-    int ransac_max_iterations;          // 最大反復回数
-    double ransac_probability;          // 成功確率
-    
+    double ransac_distance_threshold; // 平面からの距離閾値
+    int ransac_max_iterations;        // 最大反復回数
+    double ransac_probability;        // 成功確率
+
     // グリッドマップ
     std::map<std::pair<int, int>, std::vector<double>> grid_map;
 };

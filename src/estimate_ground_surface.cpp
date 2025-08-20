@@ -5,7 +5,7 @@
 using std::placeholders::_1;
 
 ObstacleDetection::ObstacleDetection(const rclcpp::NodeOptions &options) // コンストラクタ
-    : Node("estimate_ground_surface", options),                               // ノード名
+    : Node("estimate_ground_surface", options),                          // ノード名
       tf_buffer_(this->get_clock()),                                     // TF2バッファ
       tf_listener_(tf_buffer_)                                           // TF2リスナー
 {
@@ -41,150 +41,16 @@ ObstacleDetection::ObstacleDetection(const rclcpp::NodeOptions &options) // コ�
     step_ratio_threshold = get_parameter("grid.ratio_threshold").as_double();
 
     // RANSACパラメータ（デフォルト値を設定、必要に応じてパラメータファイルから取得可能）
-    ransac_distance_threshold = 0.02;  // 平面からの距離閾値（m）
-    ransac_max_iterations = 1000;      // 最大反復回数
-    ransac_probability = 0.99;         // 成功確率
+    ransac_distance_threshold = 0.05; // 平面からの距離閾値（m）
+    ransac_max_iterations = 2000;    // 最大反復回数
+    ransac_probability = 0.99;       // 成功確率
 
     // サブスクライバーとパブリッシャー
-    _lidar_subscription_ = this->create_subscription<sensor_msgs::msg::PointCloud2>("/livox/lidar", 10, std::bind(&ObstacleDetection::topic_callback, this, _1));
-    point_publisher_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/livox_processing_result", 10);
-    plane_publisher_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/detected_planes", 10);
-    obstacle_publisher_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/obstacle_points", 10);
-    marker_publisher_ = this->create_publisher<visualization_msgs::msg::MarkerArray>("/visualization_marker", 10);
+    _lidar_subscription_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
+        "/livox/lidar", 10, std::bind(&ObstacleDetection::topic_callback, this, _1));
+    point_publisher_ = this->create_publisher<sensor_msgs::msg::PointCloud2>(
+        "/colored_pointcloud", 10);
     // _imu_subscription = this->create_subscription<sensor_msgs::msg::Imu>("/vectornav/imu", 10, std::bind(&ObstacleDetection::imu_topic_callback, this, _1));
-}
-
-// RANSACによる平面検出関数
-void ObstacleDetection::detectPlanes(const pcl::PointCloud<pcl::PointXYZRGB>::Ptr& input_cloud,
-                                    pcl::PointCloud<pcl::PointXYZRGB>::Ptr& plane_cloud,
-                                    pcl::PointCloud<pcl::PointXYZRGB>::Ptr& obstacle_cloud,
-                                    Eigen::Vector4f& plane_coefficients)
-{
-    // RANSACセグメンテーションの設定
-    pcl::SACSegmentation<pcl::PointXYZRGB> seg;
-    pcl::PointIndices::Ptr inliers(new pcl::PointIndices);
-    pcl::ModelCoefficients::Ptr coefficients(new pcl::ModelCoefficients);
-
-    seg.setOptimizeCoefficients(true);
-    seg.setModelType(pcl::SACMODEL_PLANE);
-    seg.setMethodType(pcl::SAC_RANSAC);
-    seg.setMaxIterations(ransac_max_iterations);
-    seg.setDistanceThreshold(ransac_distance_threshold);
-    seg.setProbability(ransac_probability);
-    seg.setInputCloud(input_cloud);
-
-    // 平面検出を実行
-    seg.segment(*inliers, *coefficients);
-
-    if (inliers->indices.size() == 0)
-    {
-        RCLCPP_WARN(this->get_logger(), "Could not estimate a planar model for the given dataset.");
-        return;
-    }
-
-    // 平面の係数を保存
-    plane_coefficients << coefficients->values[0], 
-                          coefficients->values[1], 
-                          coefficients->values[2], 
-                          coefficients->values[3];
-
-    RCLCPP_INFO(this->get_logger(), "Plane coefficients: a=%f, b=%f, c=%f, d=%f", 
-                plane_coefficients[0], plane_coefficients[1], 
-                plane_coefficients[2], plane_coefficients[3]);
-    
-    RCLCPP_INFO(this->get_logger(), "Plane inliers: %zu points", inliers->indices.size());
-
-    // 平面点群とそれ以外（障害物）の点群を分離
-    pcl::ExtractIndices<pcl::PointXYZRGB> extract;
-    extract.setInputCloud(input_cloud);
-    extract.setIndices(inliers);
-
-    // 平面の点群を抽出
-    extract.setNegative(false);
-    extract.filter(*plane_cloud);
-
-    // 平面以外（障害物）の点群を抽出
-    extract.setNegative(true);
-    extract.filter(*obstacle_cloud);
-
-    // 平面点群を緑色に着色
-    for (auto& point : plane_cloud->points)
-    {
-        point.r = 0;
-        point.g = 255;
-        point.b = 0;
-    }
-
-    // 障害物点群を赤色に着色
-    for (auto& point : obstacle_cloud->points)
-    {
-        point.r = 255;
-        point.g = 0;
-        point.b = 0;
-    }
-}
-
-// 平面の可視化マーカーを作成
-visualization_msgs::msg::Marker ObstacleDetection::createPlaneMarker(const Eigen::Vector4f& coefficients,
-                                                                    const std::string& frame_id)
-{
-    visualization_msgs::msg::Marker marker;
-    marker.header.frame_id = frame_id;
-    marker.header.stamp = this->get_clock()->now();
-    marker.ns = "detected_plane";
-    marker.id = 0;
-    marker.type = visualization_msgs::msg::Marker::CUBE;
-    marker.action = visualization_msgs::msg::Marker::ADD;
-
-    // 平面の法線ベクトル
-    Eigen::Vector3f normal(coefficients[0], coefficients[1], coefficients[2]);
-    normal.normalize();
-
-    // 平面上の点を計算（原点から平面への最短距離の点）
-    float d = -coefficients[3];
-    Eigen::Vector3f plane_point = normal * d;
-
-    // マーカーの位置設定
-    marker.pose.position.x = plane_point.x();
-    marker.pose.position.y = plane_point.y();
-    marker.pose.position.z = plane_point.z();
-
-    // 平面の向きを設定（法線ベクトルからクォータニオンを計算）
-    Eigen::Vector3f z_axis(0, 0, 1);
-    Eigen::Vector3f rotation_axis = z_axis.cross(normal);
-    float rotation_angle = acos(z_axis.dot(normal));
-
-    if (rotation_axis.norm() > 1e-6)
-    {
-        rotation_axis.normalize();
-        Eigen::AngleAxisf rotation(rotation_angle, rotation_axis);
-        Eigen::Quaternionf quat(rotation);
-        
-        marker.pose.orientation.x = quat.x();
-        marker.pose.orientation.y = quat.y();
-        marker.pose.orientation.z = quat.z();
-        marker.pose.orientation.w = quat.w();
-    }
-    else
-    {
-        marker.pose.orientation.x = 0.0;
-        marker.pose.orientation.y = 0.0;
-        marker.pose.orientation.z = 0.0;
-        marker.pose.orientation.w = 1.0;
-    }
-
-    // マーカーのサイズ（平面を表現する薄い立方体）
-    marker.scale.x = 5.0;  // 幅
-    marker.scale.y = 5.0;  // 高さ
-    marker.scale.z = 0.01; // 厚み（薄くして平面らしく）
-
-    // マーカーの色（半透明の青）
-    marker.color.a = 0.3;
-    marker.color.r = 0.0;
-    marker.color.g = 0.0;
-    marker.color.b = 1.0;
-
-    return marker;
 }
 
 // コールバック関数
@@ -196,12 +62,7 @@ void ObstacleDetection::topic_callback(const sensor_msgs::msg::PointCloud2 &msg)
     pcl::PointCloud<pcl::PointXYZ>::Ptr raw_cloud(new pcl::PointCloud<pcl::PointXYZ>);
     pcl::PointCloud<pcl::PointXYZRGB>::Ptr raw_cloud_rgb(new pcl::PointCloud<pcl::PointXYZRGB>);
     pcl::PointCloud<pcl::PointXYZRGB>::Ptr cropped_cloud(new pcl::PointCloud<pcl::PointXYZRGB>);
-    pcl::PointCloud<pcl::PointXYZRGB>::Ptr rotated_cloud(new pcl::PointCloud<pcl::PointXYZRGB>());
-
-    // RANSACによる平面検出結果用の点群
-    pcl::PointCloud<pcl::PointXYZRGB>::Ptr plane_cloud(new pcl::PointCloud<pcl::PointXYZRGB>);
-    pcl::PointCloud<pcl::PointXYZRGB>::Ptr obstacle_cloud(new pcl::PointCloud<pcl::PointXYZRGB>);
-    Eigen::Vector4f plane_coefficients;
+    pcl::PointCloud<pcl::PointXYZRGB>::Ptr colored_cloud(new pcl::PointCloud<pcl::PointXYZRGB>());
 
     // ROSからPCLに変換
     pcl::fromROSMsg(msg, *raw_cloud);
@@ -247,41 +108,70 @@ void ObstacleDetection::topic_callback(const sensor_msgs::msg::PointCloud2 &msg)
     }
 
     // RANSACによる平面検出を実行
-    detectPlanes(cropped_cloud, plane_cloud, obstacle_cloud, plane_coefficients);
+    detectAndColorPlane(cropped_cloud, colored_cloud);
 
-    // 結果を発行
-    sensor_msgs::msg::PointCloud2 processed_msg, plane_msg, obstacle_msg;
-    
-    // 処理済み点群（全体）を発行
-    pcl::toROSMsg(*cropped_cloud, processed_msg);
-    processed_msg.header.frame_id = msg.header.frame_id;
-    processed_msg.header.stamp = msg.header.stamp;
-    point_publisher_->publish(processed_msg);
+    sensor_msgs::msg::PointCloud2 colored_msg;
+    pcl::toROSMsg(*colored_cloud, colored_msg);
+    colored_msg.header.frame_id = msg.header.frame_id;
+    colored_msg.header.stamp = msg.header.stamp;
+    point_publisher_->publish(colored_msg);
+}
 
-    // 検出された平面点群を発行
-    if (!plane_cloud->empty())
+void ObstacleDetection::detectAndColorPlane(const pcl::PointCloud<pcl::PointXYZRGB>::Ptr &input_cloud,
+                                            pcl::PointCloud<pcl::PointXYZRGB>::Ptr &colored_cloud)
+{
+    // RANSACセグメンテーションの設定
+    pcl::SACSegmentation<pcl::PointXYZRGB> seg;
+    pcl::PointIndices::Ptr inliers(new pcl::PointIndices);
+    pcl::ModelCoefficients::Ptr coefficients(new pcl::ModelCoefficients);
+
+    seg.setOptimizeCoefficients(true);
+    seg.setModelType(pcl::SACMODEL_PLANE);
+    seg.setMethodType(pcl::SAC_RANSAC);
+    seg.setMaxIterations(ransac_max_iterations);
+    seg.setDistanceThreshold(ransac_distance_threshold);
+    seg.setProbability(ransac_probability);
+    seg.setInputCloud(input_cloud);
+
+    // 平面検出を実行
+    seg.segment(*inliers, *coefficients);
+
+    // 元の点群をコピー
+    *colored_cloud = *input_cloud;
+
+    if (inliers->indices.size() == 0)
     {
-        pcl::toROSMsg(*plane_cloud, plane_msg);
-        plane_msg.header.frame_id = msg.header.frame_id;
-        plane_msg.header.stamp = msg.header.stamp;
-        plane_publisher_->publish(plane_msg);
+        RCLCPP_WARN(this->get_logger(), "No plane detected. All points remain original color.");
+        // 平面が見つからない場合、全ての点を白色にする
+        for (auto &point : colored_cloud->points)
+        {
+            point.r = 255;
+            point.g = 255;
+            point.b = 255;
+        }
+        return;
     }
 
-    // 障害物点群を発行
-    if (!obstacle_cloud->empty())
+    RCLCPP_INFO(this->get_logger(), "Plane detected with %zu inliers", inliers->indices.size());
+
+    // 全ての点をまず灰色（非平面）に設定
+    for (auto &point : colored_cloud->points)
     {
-        pcl::toROSMsg(*obstacle_cloud, obstacle_msg);
-        obstacle_msg.header.frame_id = msg.header.frame_id;
-        obstacle_msg.header.stamp = msg.header.stamp;
-        obstacle_publisher_->publish(obstacle_msg);
+        point.r = 128;
+        point.g = 128;
+        point.b = 128;
     }
 
-    // 平面の可視化マーカーを発行
-    if (!plane_cloud->empty())
+    // 検出された平面の点を緑色に着色
+    for (const auto &index : inliers->indices)
     {
-        visualization_msgs::msg::MarkerArray marker_array;
-        visualization_msgs::msg::Marker plane_marker = createPlaneMarker(plane_coefficients, msg.header.frame_id);
-        marker_array.markers.push_back(plane_marker);
-        marker_publisher_->publish(marker_array);
+        colored_cloud->points[index].r = 0;   // 赤成分
+        colored_cloud->points[index].g = 255; // 緑成分
+        colored_cloud->points[index].b = 0;   // 青成分
     }
+
+    // 平面の係数をログ出力
+    RCLCPP_INFO(this->get_logger(), "Plane coefficients: a=%f, b=%f, c=%f, d=%f",
+                coefficients->values[0], coefficients->values[1],
+                coefficients->values[2], coefficients->values[3]);
 }
