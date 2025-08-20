@@ -42,8 +42,23 @@ ObstacleDetection::ObstacleDetection(const rclcpp::NodeOptions &options) // コ�
 
     // RANSACパラメータ（デフォルト値を設定、必要に応じてパラメータファイルから取得可能）
     ransac_distance_threshold = 0.05; // 平面からの距離閾値（m）
-    ransac_max_iterations = 2000;    // 最大反復回数
-    ransac_probability = 0.99;       // 成功確率
+    ransac_max_iterations = 2000;     // 最大反復回数
+    ransac_probability = 0.99;        // 成功確率
+
+    // X分割RANSACのパラメータ
+    x_division_boundary = get_parameter("x_division.boundary").as_double(); 
+    min_points_per_division = get_parameter("x_division.min_points").as_int();
+    plane_angle_threshold = get_parameter("x_division.plane_angle_threshold").as_double();
+
+    // パラメータファイルから取得できる場合
+    try
+    {
+        min_points_per_division = get_parameter("x_division.min_points").as_int();
+    }
+    catch (...)
+    {
+        // パラメータが存在しない場合はデフォルト値を使用
+    }
 
     // サブスクライバーとパブリッシャー
     _lidar_subscription_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
@@ -108,7 +123,7 @@ void ObstacleDetection::topic_callback(const sensor_msgs::msg::PointCloud2 &msg)
     }
 
     // RANSACによる平面検出を実行
-    detectAndColorPlane(cropped_cloud, colored_cloud);
+    detectAndColorPlaneWithXBoundary(cropped_cloud, colored_cloud);
 
     sensor_msgs::msg::PointCloud2 colored_msg;
     pcl::toROSMsg(*colored_cloud, colored_msg);
@@ -117,42 +132,34 @@ void ObstacleDetection::topic_callback(const sensor_msgs::msg::PointCloud2 &msg)
     point_publisher_->publish(colored_msg);
 }
 
-void ObstacleDetection::detectAndColorPlane(const pcl::PointCloud<pcl::PointXYZRGB>::Ptr &input_cloud,
-                                            pcl::PointCloud<pcl::PointXYZRGB>::Ptr &colored_cloud)
+void ObstacleDetection::detectAndColorPlaneWithXBoundary(const pcl::PointCloud<pcl::PointXYZRGB>::Ptr &input_cloud,
+                                                         pcl::PointCloud<pcl::PointXYZRGB>::Ptr &colored_cloud)
 {
-    // RANSACセグメンテーションの設定
-    pcl::SACSegmentation<pcl::PointXYZRGB> seg;
-    pcl::PointIndices::Ptr inliers(new pcl::PointIndices);
-    pcl::ModelCoefficients::Ptr coefficients(new pcl::ModelCoefficients);
-
-    seg.setOptimizeCoefficients(true);
-    seg.setModelType(pcl::SACMODEL_PLANE);
-    seg.setMethodType(pcl::SAC_RANSAC);
-    seg.setMaxIterations(ransac_max_iterations);
-    seg.setDistanceThreshold(ransac_distance_threshold);
-    seg.setProbability(ransac_probability);
-    seg.setInputCloud(input_cloud);
-
-    // 平面検出を実行
-    seg.segment(*inliers, *coefficients);
-
     // 元の点群をコピー
     *colored_cloud = *input_cloud;
 
-    if (inliers->indices.size() == 0)
+    // 点群を境界で前後に分割
+    std::vector<int> front_indices; // X < boundary の点群
+    std::vector<int> back_indices;  // X >= boundary の点群
+
+    for (int i = 0; i < input_cloud->points.size(); i++)
     {
-        RCLCPP_WARN(this->get_logger(), "No plane detected. All points remain original color.");
-        // 平面が見つからない場合、全ての点を白色にする
-        for (auto &point : colored_cloud->points)
+        const auto &point = input_cloud->points[i];
+        if (point.x < x_division_boundary)
         {
-            point.r = 255;
-            point.g = 255;
-            point.b = 255;
+            front_indices.push_back(i);
         }
-        return;
+        else
+        {
+            back_indices.push_back(i);
+        }
     }
 
-    RCLCPP_INFO(this->get_logger(), "Plane detected with %zu inliers", inliers->indices.size());
+    RCLCPP_INFO(this->get_logger(), "X boundary: %.2f", x_division_boundary);
+    RCLCPP_INFO(this->get_logger(), "Front section (X < %.2f): %zu points",
+                x_division_boundary, front_indices.size());
+    RCLCPP_INFO(this->get_logger(), "Back section (X >= %.2f): %zu points",
+                x_division_boundary, back_indices.size());
 
     // 全ての点をまず灰色（非平面）に設定
     for (auto &point : colored_cloud->points)
@@ -162,16 +169,171 @@ void ObstacleDetection::detectAndColorPlane(const pcl::PointCloud<pcl::PointXYZR
         point.b = 128;
     }
 
-    // 検出された平面の点を緑色に着色
-    for (const auto &index : inliers->indices)
+    // 平面の係数を格納する変数
+    pcl::ModelCoefficients::Ptr front_coefficients(new pcl::ModelCoefficients);
+    pcl::ModelCoefficients::Ptr back_coefficients(new pcl::ModelCoefficients);
+    bool front_plane_detected = false;
+    bool back_plane_detected = false;
+
+    // 前方セクション（X < boundary）でRANSAC実行
+    if (front_indices.size() >= min_points_per_division)
     {
-        colored_cloud->points[index].r = 0;   // 赤成分
-        colored_cloud->points[index].g = 255; // 緑成分
-        colored_cloud->points[index].b = 0;   // 青成分
+        front_plane_detected = processSectionWithCoefficients(input_cloud, front_indices, colored_cloud,
+                                                              "Front", 255, 0, 0, front_coefficients);
+    }
+    else
+    {
+        RCLCPP_WARN(this->get_logger(), "Front section has too few points (%zu < %d), skipping",
+                    front_indices.size(), min_points_per_division);
+    }
+
+    // 後方セクション（X >= boundary）でRANSAC実行
+    if (back_indices.size() >= min_points_per_division)
+    {
+        back_plane_detected = processSectionWithCoefficients(input_cloud, back_indices, colored_cloud,
+                                                             "Back", 0, 255, 0, back_coefficients);
+    }
+    else
+    {
+        RCLCPP_WARN(this->get_logger(), "Back section has too few points (%zu < %d), skipping",
+                    back_indices.size(), min_points_per_division);
+    }
+
+    // 両方の平面が検出された場合、角度を確認して必要に応じて調整
+    if (front_plane_detected && back_plane_detected)
+    {
+        double angle = calculatePlaneAngle(front_coefficients, back_coefficients);
+        RCLCPP_INFO(this->get_logger(), "Angle between front and back planes: %.2f degrees", angle);
+
+        if (angle > plane_angle_threshold)
+        {
+            RCLCPP_INFO(this->get_logger(), "Plane angle (%.2f°) exceeds threshold (%.2f°), aligning back plane to front plane",
+                        angle, plane_angle_threshold);
+
+            // 後方平面を前方平面に合わせて再着色
+            alignBackPlaneToFront(input_cloud, back_indices, colored_cloud, front_coefficients);
+        }
+    }
+}
+
+bool ObstacleDetection::processSectionWithCoefficients(const pcl::PointCloud<pcl::PointXYZRGB>::Ptr &input_cloud,
+                                                       const std::vector<int> &section_indices,
+                                                       pcl::PointCloud<pcl::PointXYZRGB>::Ptr &colored_cloud,
+                                                       const std::string &section_name,
+                                                       uint8_t r, uint8_t g, uint8_t b,
+                                                       pcl::ModelCoefficients::Ptr &coefficients)
+{
+    // セクションの点群を作成
+    pcl::PointCloud<pcl::PointXYZRGB>::Ptr section_cloud(new pcl::PointCloud<pcl::PointXYZRGB>);
+
+    for (const int &idx : section_indices)
+    {
+        section_cloud->points.push_back(input_cloud->points[idx]);
+    }
+    section_cloud->width = section_cloud->points.size();
+    section_cloud->height = 1;
+    section_cloud->is_dense = false;
+
+    // RANSACセグメンテーションの設定
+    pcl::SACSegmentation<pcl::PointXYZRGB> seg;
+    pcl::PointIndices::Ptr inliers(new pcl::PointIndices);
+
+    seg.setOptimizeCoefficients(true);
+    seg.setModelType(pcl::SACMODEL_PLANE);
+    seg.setMethodType(pcl::SAC_RANSAC);
+    seg.setMaxIterations(ransac_max_iterations);
+    seg.setDistanceThreshold(ransac_distance_threshold);
+    seg.setProbability(ransac_probability);
+    seg.setInputCloud(section_cloud);
+
+    // 平面検出を実行
+    seg.segment(*inliers, *coefficients);
+
+    if (inliers->indices.size() == 0)
+    {
+        RCLCPP_WARN(this->get_logger(), "No plane detected in %s section", section_name.c_str());
+        return false;
+    }
+
+    RCLCPP_INFO(this->get_logger(), "%s section: Plane detected with %zu inliers",
+                section_name.c_str(), inliers->indices.size());
+
+    // 検出された平面の点を指定色で着色
+    for (const auto &inlier_idx : inliers->indices)
+    {
+        int original_idx = section_indices[inlier_idx];
+        colored_cloud->points[original_idx].r = r;
+        colored_cloud->points[original_idx].g = g;
+        colored_cloud->points[original_idx].b = b;
     }
 
     // 平面の係数をログ出力
-    RCLCPP_INFO(this->get_logger(), "Plane coefficients: a=%f, b=%f, c=%f, d=%f",
-                coefficients->values[0], coefficients->values[1],
+    RCLCPP_INFO(this->get_logger(), "%s section plane coefficients: a=%f, b=%f, c=%f, d=%f",
+                section_name.c_str(), coefficients->values[0], coefficients->values[1],
                 coefficients->values[2], coefficients->values[3]);
+
+    return true;
+}
+
+double ObstacleDetection::calculatePlaneAngle(const pcl::ModelCoefficients::Ptr &plane1,
+                                              const pcl::ModelCoefficients::Ptr &plane2)
+{
+    // 平面の法線ベクトルを取得
+    Eigen::Vector3f normal1(plane1->values[0], plane1->values[1], plane1->values[2]);
+    Eigen::Vector3f normal2(plane2->values[0], plane2->values[1], plane2->values[2]);
+
+    // 法線ベクトルを正規化
+    normal1.normalize();
+    normal2.normalize();
+
+    // 内積を計算（コサイン値）
+    float cos_angle = normal1.dot(normal2);
+
+    // コサイン値を-1から1の範囲に制限
+    cos_angle = std::max(-1.0f, std::min(1.0f, cos_angle));
+
+    // 角度を計算（ラジアンから度に変換）
+    float angle_rad = std::acos(std::abs(cos_angle)); // 絶対値を取って鋭角を得る
+    float angle_deg = angle_rad * 180.0f / M_PI;
+
+    return static_cast<double>(angle_deg);
+}
+
+void ObstacleDetection::alignBackPlaneToFront(const pcl::PointCloud<pcl::PointXYZRGB>::Ptr &input_cloud,
+                                              const std::vector<int> &back_indices,
+                                              pcl::PointCloud<pcl::PointXYZRGB>::Ptr &colored_cloud,
+                                              const pcl::ModelCoefficients::Ptr &front_coefficients)
+{
+    // 前方平面の係数
+    float a = front_coefficients->values[0];
+    float b = front_coefficients->values[1];
+    float c = front_coefficients->values[2];
+    float d = front_coefficients->values[3];
+
+    RCLCPP_INFO(this->get_logger(), "Aligning back section points to front plane (a=%f, b=%f, c=%f, d=%f)",
+                a, b, c, d);
+
+    int aligned_count = 0;
+
+    // 後方セクションの各点について、前方平面からの距離を計算
+    for (const int &idx : back_indices)
+    {
+        const auto &point = input_cloud->points[idx];
+
+        // 点から平面までの距離を計算
+        float distance = std::abs(a * point.x + b * point.y + c * point.z + d) /
+                         std::sqrt(a * a + b * b + c * c);
+
+        // 距離が閾値以下の場合、平面の点として着色
+        if (distance <= ransac_distance_threshold)
+        {
+            colored_cloud->points[idx].r = 0; // 青色で着色（前方平面に合わせた後方点）
+            colored_cloud->points[idx].g = 0;
+            colored_cloud->points[idx].b = 255;
+            aligned_count++;
+        }
+        // 距離が閾値を超える場合は灰色のまま（非平面点）
+    }
+
+    RCLCPP_INFO(this->get_logger(), "Aligned %d back section points to front plane", aligned_count);
 }
