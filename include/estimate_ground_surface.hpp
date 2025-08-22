@@ -51,6 +51,9 @@ private:
                                pcl::PointCloud<pcl::PointXYZRGB>::Ptr &colored_cloud,
                                const pcl::ModelCoefficients::Ptr &front_coefficients);
 
+    double calculatePlaneDistanceAtBoundary(const pcl::ModelCoefficients::Ptr &front_plane,
+                                            const pcl::ModelCoefficients::Ptr &back_plane);
+
     // TF2関連
     tf2_ros::Buffer tf_buffer_;
     tf2_ros::TransformListener tf_listener_;
@@ -87,9 +90,13 @@ private:
     double ransac_probability;        // 成功確率
 
     // X境界分割RANSACのパラメータ
-    double x_division_boundary;  // 分割境界のX座標
-    int min_points_per_division; // 各分割で最低必要な点数
-    double plane_angle_threshold;   // 平面間角度閾値（度）
+    double x_division_boundary;   // 分割境界のX座標
+    int min_points_per_division;  // 各分割で最低必要な点数
+    double plane_angle_threshold; // 平面間角度閾値（度）
+    double plane_distance_threshold;
+
+    double obstacle_height_threshold;
+    double step_depth_threshold;
 
     // グリッドマップ
     std::map<std::pair<int, int>, std::vector<double>> grid_map;

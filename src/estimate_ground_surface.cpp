@@ -50,6 +50,8 @@ ObstacleDetection::ObstacleDetection(const rclcpp::NodeOptions &options) // コ�
     min_points_per_division = get_parameter("x_division.min_points").as_int();
     plane_angle_threshold = get_parameter("x_division.plane_angle_threshold").as_double();
 
+    plane_distance_threshold = get_parameter("x_division.plane_distance_threshold").as_double();
+
     // パラメータファイルから取得できる場合
     try
     {
@@ -200,16 +202,19 @@ void ObstacleDetection::detectAndColorPlaneWithXBoundary(const pcl::PointCloud<p
                     back_indices.size(), min_points_per_division);
     }
 
-    // 両方の平面が検出された場合、角度を確認して必要に応じて調整
+    // 両方の平面が検出された場合、角度と距離を確認して必要に応じて調整
     if (front_plane_detected && back_plane_detected)
     {
         double angle = calculatePlaneAngle(front_coefficients, back_coefficients);
         RCLCPP_INFO(this->get_logger(), "Angle between front and back planes: %.2f degrees", angle);
+        double distance = calculatePlaneDistanceAtBoundary(front_coefficients, back_coefficients);
 
-        if (angle > plane_angle_threshold)
+        if (angle > plane_angle_threshold || distance > plane_distance_threshold)
         {
-            RCLCPP_INFO(this->get_logger(), "Plane angle (%.2f°) exceeds threshold (%.2f°), aligning back plane to front plane",
-                        angle, plane_angle_threshold);
+            RCLCPP_INFO(this->get_logger(),
+                        "Condition met - Angle: %.2f° (threshold: %.2f°), Distance: %.3f m (threshold: %.3f m)",
+                        angle, plane_angle_threshold, distance, plane_distance_threshold);
+            RCLCPP_INFO(this->get_logger(), "Aligning back plane to front plane");
 
             for (const int &idx : back_plane_indices)
             {
@@ -347,12 +352,45 @@ void ObstacleDetection::alignBackPlaneToFront(const pcl::PointCloud<pcl::PointXY
         if (distance <= ransac_distance_threshold)
         {
             colored_cloud->points[idx].r = 0; // 青色で着色（前方平面に合わせた後方点）
-            colored_cloud->points[idx].g = 0;
-            colored_cloud->points[idx].b = 255;
+            colored_cloud->points[idx].g = 100;
+            colored_cloud->points[idx].b = 0;
             aligned_count++;
         }
         // 距離が閾値を超える場合は灰色のまま（非平面点）
     }
 
-    RCLCPP_INFO(this->get_logger(), "Aligned %d back section points to front plane", aligned_count);
+    // RCLCPP_INFO(this->get_logger(), "Aligned %d back section points to front plane", aligned_count);
+}
+
+double ObstacleDetection::calculatePlaneDistanceAtBoundary(const pcl::ModelCoefficients::Ptr &front_plane,
+                                                           const pcl::ModelCoefficients::Ptr &back_plane)
+{
+    // 前方平面の係数
+    float a1 = front_plane->values[0];
+    float b1 = front_plane->values[1];
+    float c1 = front_plane->values[2];
+    float d1 = front_plane->values[3];
+
+    // 後方平面の係数
+    float a2 = back_plane->values[0];
+    float b2 = back_plane->values[1];
+    float c2 = back_plane->values[2];
+    float d2 = back_plane->values[3];
+
+    // X境界における平面の高さ（Z座標）を計算
+    // 平面方程式: ax + by + cz + d = 0 から z = -(ax + by + d) / c
+    // Y=0（中央線）での高さを計算
+
+    float y_center = 0.0f; // Y座標の中央値（必要に応じて調整）
+
+    // 前方平面のX境界での高さ
+    float z1 = -(a1 * x_division_boundary + b1 * y_center + d1) / c1;
+
+    // 後方平面のX境界での高さ
+    float z2 = -(a2 * x_division_boundary + b2 * y_center + d2) / c2;
+
+    // 2つの平面間の距離（高さの差の絶対値）
+    double distance = std::abs(z2 - z1);
+
+    return distance;
 }
