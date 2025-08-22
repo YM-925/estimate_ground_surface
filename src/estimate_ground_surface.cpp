@@ -46,7 +46,7 @@ ObstacleDetection::ObstacleDetection(const rclcpp::NodeOptions &options) // コ�
     ransac_probability = 0.99;        // 成功確率
 
     // X分割RANSACのパラメータ
-    x_division_boundary = get_parameter("x_division.boundary").as_double(); 
+    x_division_boundary = get_parameter("x_division.boundary").as_double();
     min_points_per_division = get_parameter("x_division.min_points").as_int();
     plane_angle_threshold = get_parameter("x_division.plane_angle_threshold").as_double();
 
@@ -179,7 +179,7 @@ void ObstacleDetection::detectAndColorPlaneWithXBoundary(const pcl::PointCloud<p
     if (front_indices.size() >= min_points_per_division)
     {
         front_plane_detected = processSectionWithCoefficients(input_cloud, front_indices, colored_cloud,
-                                                              "Front", 255, 0, 0, front_coefficients);
+                                                              "Front", 0, 100, 0, front_coefficients, nullptr);
     }
     else
     {
@@ -188,10 +188,11 @@ void ObstacleDetection::detectAndColorPlaneWithXBoundary(const pcl::PointCloud<p
     }
 
     // 後方セクション（X >= boundary）でRANSAC実行
+    std::vector<int> back_plane_indices;
     if (back_indices.size() >= min_points_per_division)
     {
         back_plane_detected = processSectionWithCoefficients(input_cloud, back_indices, colored_cloud,
-                                                             "Back", 0, 255, 0, back_coefficients);
+                                                             "Back", 0, 255, 0, back_coefficients, &back_plane_indices);
     }
     else
     {
@@ -210,6 +211,13 @@ void ObstacleDetection::detectAndColorPlaneWithXBoundary(const pcl::PointCloud<p
             RCLCPP_INFO(this->get_logger(), "Plane angle (%.2f°) exceeds threshold (%.2f°), aligning back plane to front plane",
                         angle, plane_angle_threshold);
 
+            for (const int &idx : back_plane_indices)
+            {
+                colored_cloud->points[idx].r = 128;
+                colored_cloud->points[idx].g = 128;
+                colored_cloud->points[idx].b = 128;
+            }
+
             // 後方平面を前方平面に合わせて再着色
             alignBackPlaneToFront(input_cloud, back_indices, colored_cloud, front_coefficients);
         }
@@ -221,7 +229,8 @@ bool ObstacleDetection::processSectionWithCoefficients(const pcl::PointCloud<pcl
                                                        pcl::PointCloud<pcl::PointXYZRGB>::Ptr &colored_cloud,
                                                        const std::string &section_name,
                                                        uint8_t r, uint8_t g, uint8_t b,
-                                                       pcl::ModelCoefficients::Ptr &coefficients)
+                                                       pcl::ModelCoefficients::Ptr &coefficients,
+                                                       std::vector<int> *plane_indices)
 {
     // セクションの点群を作成
     pcl::PointCloud<pcl::PointXYZRGB>::Ptr section_cloud(new pcl::PointCloud<pcl::PointXYZRGB>);
@@ -265,6 +274,16 @@ bool ObstacleDetection::processSectionWithCoefficients(const pcl::PointCloud<pcl
         colored_cloud->points[original_idx].r = r;
         colored_cloud->points[original_idx].g = g;
         colored_cloud->points[original_idx].b = b;
+    }
+
+    // 平面として着色された点のインデックスを記録（plane_indicesが指定されている場合のみ）
+    if (plane_indices != nullptr)
+    {
+        for (const auto &inlier_idx : inliers->indices)
+        {
+            int original_idx = section_indices[inlier_idx];
+            plane_indices->push_back(original_idx);
+        }
     }
 
     // 平面の係数をログ出力

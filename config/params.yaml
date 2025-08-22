@@ -44,4 +44,4 @@ estimate_ground_surface:
     x_division:
       boundary: 3.0       # 境界のX座標（m）
       min_points: 100     # 各セクションでの最低点数
-      plane_angle_threshold: 10.0      # 平面間角度閾値（度）
+      plane_angle_threshold: 20.0      # 平面間角度閾値（度）

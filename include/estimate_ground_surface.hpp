@@ -40,7 +40,8 @@ private:
                                         pcl::PointCloud<pcl::PointXYZRGB>::Ptr &colored_cloud,
                                         const std::string &section_name,
                                         uint8_t r, uint8_t g, uint8_t b,
-                                        pcl::ModelCoefficients::Ptr &coefficients);
+                                        pcl::ModelCoefficients::Ptr &coefficients,
+                                        std::vector<int> *plane_indices);
 
     double calculatePlaneAngle(const pcl::ModelCoefficients::Ptr &plane1,
                                const pcl::ModelCoefficients::Ptr &plane2);
